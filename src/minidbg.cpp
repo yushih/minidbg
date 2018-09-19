@@ -87,6 +87,8 @@ void debugger::run() {
     int wait_status;
     auto options = 0;
     waitpid(m_pid, &wait_status, options);
+    
+    ptrace(PTRACE_SETOPTIONS, m_pid, nullptr, PTRACE_O_TRACEEXEC);
 
     char* line = nullptr;
     while((line = linenoise("minidbg> ")) != nullptr) {
@@ -161,6 +163,12 @@ void debugger::wait_for_signal() {
     int wait_status;
     auto options = 0;
     waitpid(m_pid, &wait_status, options);
+
+    if (wait_status>>8 == (SIGTRAP | (PTRACE_EVENT_EXEC<<8))) {
+        std::cout << "debugee execve" << std::endl;
+        ptrace(PTRACE_CONT, m_pid, nullptr, nullptr);
+        return;
+    }
 
     auto siginfo = get_signal_info();
 
@@ -515,12 +523,13 @@ void debugger::handle_command(const std::string& line) {
     }
 }
 
-void execute_debugee (const std::string& prog_name) {
+void execute_debugee (const std::string& cmd_line) {
     if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) {
         std::cerr << "Error in ptrace\n";
         return;
     }
-    execl(prog_name.c_str(), prog_name.c_str(), nullptr);
+    std::string sh_arg = std::string("exec ")+cmd_line;
+    execl("/bin/sh", "/bin/sh", "-c", sh_arg.c_str(), nullptr);
 }
 
 int main(int argc, char* argv[]) {
@@ -529,12 +538,22 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    auto prog = argv[1];
+    auto cmd_line = argv[1];
+    int i;
+    for (i=0; i<strlen(cmd_line); i++) {
+        if (cmd_line[i]==' ') break;
+    }
+    
+    auto prog = std::string(cmd_line, i);
+    
+    std::cout << "cmd line: " << cmd_line << std::endl
+              << "prog name: " << prog << std::endl;
+
 
     auto pid = fork();
     if (pid == 0) {
         //child
-        execute_debugee(prog);
+        execute_debugee(cmd_line);
 
     }
     else if (pid >= 1)  {
