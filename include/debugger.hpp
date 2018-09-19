@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <signal.h>
 #include <fcntl.h>
+#include <fstream> 
 
 #include "dwarf/dwarf++.hh"
 #include "elf/elf++.hh"
@@ -39,7 +40,7 @@ namespace minidbg {
     class debugger {
     public:
         debugger (std::string prog_name, pid_t pid)
-            : m_prog_name{std::move(prog_name)}, m_pid{pid} {
+            : m_prog_name{std::move(prog_name)}, m_pid{pid}, is_tracing(false) {
                 auto fd = open(m_prog_name.c_str(), O_RDONLY);
 
                 m_elf = elf::elf{elf::create_mmap_loader(fd)};
@@ -81,6 +82,9 @@ namespace minidbg {
         dwarf::dwarf m_dwarf;
         elf::elf m_elf;
         std::unordered_map<std::intptr_t,breakpoint> m_breakpoints;
+
+        bool is_tracing;
+        std::ofstream* pofs;
     };
 }
 

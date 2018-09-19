@@ -156,7 +156,23 @@ void debugger::handle_sigtrap(siginfo_t info) {
     case TRAP_TRACE:
         return;
     default:
-        std::cout << "Unknown SIGTRAP code " << info.si_code << std::endl;
+        switch (info.si_code) {
+        case SI_USER:
+            std::cout << "SIGTRAP code SI_USER by " << info.si_pid << std::endl;
+            break;
+        case SI_TIMER:
+            std::cout << "SIGTRAP code SI_TIMER" << std::endl;
+            break;
+        case SI_ASYNCIO:
+            std::cout << "SIGTRAP code SI_ASYNCIO" << std::endl;
+            break;
+        default:
+            std::cout << "Unknown SIGTRAP code " << info.si_code << std::endl;
+        }
+            
+        if (info.si_errno !=0) {
+            std::cout << "Error: " << strerror(info.si_errno) << std::endl;
+        }
         return;
     }
 }
@@ -512,6 +528,35 @@ void debugger::handle_command(const std::string& line) {
         for (auto&& s : syms) {
             std::cout << s.name << ' ' << to_string(s.type) << " 0x" << std::hex << s.addr << std::endl;
         }
+    }
+
+    else if (is_prefix(command, "trace")) {
+        pofs = new std::ofstream{args[1], std::ofstream::out};
+
+        step_over_breakpoint();
+        for (;;) {
+            auto line_entry = get_line_entry_from_pc(get_pc());
+
+            (*pofs) << line_entry->file->path << ":" << line_entry->line << std::endl;
+            auto line = line_entry->line;
+
+            while (get_line_entry_from_pc(get_pc())->line == line) {
+                if (m_breakpoints.count(get_pc())) {
+                    goto end_for_line_loop;
+                }
+                else {
+                    single_step_instruction();
+                }
+            }
+        }
+    end_for_line_loop:
+
+        auto line_entry = get_line_entry_from_pc(get_pc());
+        print_source(line_entry->file->path, line_entry->line);
+
+        pofs->close();
+        delete pofs;
+        pofs = NULL;
     }
 
     else {
