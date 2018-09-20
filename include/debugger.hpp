@@ -75,6 +75,7 @@ namespace minidbg {
         auto get_pc() -> uint64_t;
         void set_pc(uint64_t pc);
         auto get_line_entry_from_pc(uint64_t pc) -> dwarf::line_table::iterator;
+        auto get_current_line_entry_or_stepi() -> dwarf::line_table::iterator;
         auto get_function_from_pc(uint64_t pc) -> dwarf::die;
 
         std::string m_prog_name;

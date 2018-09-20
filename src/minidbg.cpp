@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iomanip>
 
+#include <execinfo.h>
+
 using namespace minidbg;
 
 symbol_type to_symbol_type(elf::stt sym) {
@@ -66,6 +68,12 @@ dwarf::die debugger::get_function_from_pc(uint64_t pc) {
     throw std::out_of_range{"Cannot find function"};
 }
 
+void bt() {
+    void *array[1024];
+    size_t size = backtrace(array, 1024);
+    backtrace_symbols_fd(array, size, 1);
+}
+
 dwarf::line_table::iterator debugger::get_line_entry_from_pc(uint64_t pc) {
     for (auto &cu : m_dwarf.compilation_units()) {
         if (die_pc_range(cu.root()).contains(pc)) {
@@ -81,6 +89,16 @@ dwarf::line_table::iterator debugger::get_line_entry_from_pc(uint64_t pc) {
     }
 
     throw std::out_of_range{"Cannot find line entry"};
+}
+
+dwarf::line_table::iterator debugger::get_current_line_entry_or_stepi() {
+    for (;;) {
+        try {
+            return get_line_entry_from_pc(get_pc());
+        } catch (const std::out_of_range&) {
+            single_step_instruction();
+        }
+    }
 }
 
 void debugger::run() {
@@ -147,6 +165,10 @@ void debugger::handle_sigtrap(siginfo_t info) {
     case TRAP_BRKPT:
     {
         set_pc(get_pc()-1);
+        if (!m_breakpoints.count(get_pc())) {
+            ptrace(PTRACE_CONT, m_pid, nullptr, nullptr);
+            return;
+        }
         std::cout << "Hit breakpoint at address 0x" << std::hex << get_pc() << std::endl;
         auto line_entry = get_line_entry_from_pc(get_pc());
         print_source(line_entry->file->path, line_entry->line);
@@ -535,12 +557,14 @@ void debugger::handle_command(const std::string& line) {
 
         step_over_breakpoint();
         for (;;) {
-            auto line_entry = get_line_entry_from_pc(get_pc());
+            auto line_entry = get_current_line_entry_or_stepi();
 
             (*pofs) << line_entry->file->path << ":" << line_entry->line << std::endl;
+            std::cout << line_entry->file->path << ":" << line_entry->line << std::endl;
             auto line = line_entry->line;
 
-            while (get_line_entry_from_pc(get_pc())->line == line) {
+            while (get_current_line_entry_or_stepi()->line == line) {
+                // stop tracing when hit a breakpoint
                 if (m_breakpoints.count(get_pc())) {
                     goto end_for_line_loop;
                 }
@@ -551,12 +575,17 @@ void debugger::handle_command(const std::string& line) {
         }
     end_for_line_loop:
 
-        auto line_entry = get_line_entry_from_pc(get_pc());
-        print_source(line_entry->file->path, line_entry->line);
+        try {
+            auto line_entry = get_line_entry_from_pc(get_pc());
+            print_source(line_entry->file->path, line_entry->line);
+        } catch (const std::out_of_range&) {
+            puts("end of trace");
+        }
 
         pofs->close();
         delete pofs;
         pofs = NULL;
+
     }
 
     else {
