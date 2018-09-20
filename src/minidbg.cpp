@@ -91,16 +91,6 @@ dwarf::line_table::iterator debugger::get_line_entry_from_pc(uint64_t pc) {
     throw std::out_of_range{"Cannot find line entry"};
 }
 
-dwarf::line_table::iterator debugger::get_current_line_entry_or_stepi() {
-    for (;;) {
-        try {
-            return get_line_entry_from_pc(get_pc());
-        } catch (const std::out_of_range&) {
-            single_step_instruction();
-        }
-    }
-}
-
 void debugger::run() {
     int wait_status;
     auto options = 0;
@@ -165,14 +155,12 @@ void debugger::handle_sigtrap(siginfo_t info) {
     case TRAP_BRKPT:
     {
         set_pc(get_pc()-1);
-        if (!m_breakpoints.count(get_pc())) {
-            ptrace(PTRACE_CONT, m_pid, nullptr, nullptr);
+        if (m_breakpoints.count(get_pc())) {
+            std::cout << "Hit breakpoint at address 0x" << std::hex << get_pc() << std::endl;
+            auto line_entry = get_line_entry_from_pc(get_pc());
+            print_source(line_entry->file->path, line_entry->line);
             return;
         }
-        std::cout << "Hit breakpoint at address 0x" << std::hex << get_pc() << std::endl;
-        auto line_entry = get_line_entry_from_pc(get_pc());
-        print_source(line_entry->file->path, line_entry->line);
-        return;
     }
     //this will be set if the signal was sent by single stepping
     case TRAP_TRACE:
@@ -216,6 +204,7 @@ void debugger::wait_for_signal() {
     default:
         std::cout << "Got signal " << strsignal(siginfo.si_signo) << std::endl;
     }
+
 }
 
 void debugger::continue_execution() {
@@ -553,39 +542,60 @@ void debugger::handle_command(const std::string& line) {
     }
 
     else if (is_prefix(command, "trace")) {
-        pofs = new std::ofstream{args[1], std::ofstream::out};
-
-        step_over_breakpoint();
-        for (;;) {
-            auto line_entry = get_current_line_entry_or_stepi();
-
-            (*pofs) << line_entry->file->path << ":" << line_entry->line << std::endl;
-            std::cout << line_entry->file->path << ":" << line_entry->line << std::endl;
-            auto line = line_entry->line;
-
-            while (get_current_line_entry_or_stepi()->line == line) {
-                // stop tracing when hit a breakpoint
-                if (m_breakpoints.count(get_pc())) {
-                    goto end_for_line_loop;
-                }
-                else {
-                    single_step_instruction();
-                }
+        const dwarf::compilation_unit* cu = nullptr;
+        std::string file = args[1];
+        for (auto& _cu : m_dwarf.compilation_units()) {
+            if (is_suffix(file, at_name(_cu.root()))) {
+                cu = &_cu;
+                break;
             }
         }
-    end_for_line_loop:
+        if (!cu) {
+            std::cout << "could not find source" << file << std::endl;
+        } else {
+            std::unordered_map<std::intptr_t,breakpoint> tracepoints;
+            int i = 0;
 
-        try {
-            auto line_entry = get_line_entry_from_pc(get_pc());
-            print_source(line_entry->file->path, line_entry->line);
-        } catch (const std::out_of_range&) {
-            puts("end of trace");
+            for (const auto& entry : cu->get_line_table()) {
+                if (entry.is_stmt && !tracepoints.count(entry.address)) {
+                    breakpoint bp {m_pid, entry.address};
+                    bp.enable();
+                    tracepoints[entry.address] = bp;
+                    i++;
+                }
+            }
+            std::cout << "tracing " << std::dec << i << " lines" << std::endl;
+
+            std::ofstream ofs {args[2], std::ofstream::out};
+
+            step_over_breakpoint();
+
+            for (;;) {
+                ptrace(PTRACE_CONT, m_pid, nullptr, nullptr);
+                wait_for_signal();
+                if (m_breakpoints.count(get_pc())) {
+                    // hit a user set bp
+                    break;
+                } else if (tracepoints.count(get_pc()))  {
+                    // hit a trace bp
+                    auto line_entry = get_line_entry_from_pc(get_pc());
+                    //std::cout << line_entry->file->path<<":"<< std::dec<< line_entry->line << std::endl;
+                    ofs << line_entry->file->path<<":"<< std::dec<< line_entry->line << std::endl;
+
+                    auto& bp = tracepoints[get_pc()];
+                    bp.disable();
+                    single_step_instruction();
+                    bp.enable();
+                } else {
+                    std::cout << "break at "<< std::hex << get_pc() << std::endl;
+                    return;
+                }
+            }
+
+            for (auto p: tracepoints) {
+                p.second.disable();
+            }
         }
-
-        pofs->close();
-        delete pofs;
-        pofs = NULL;
-
     }
 
     else {
